@@ -10,8 +10,16 @@ set -u
 cd "$(dirname "$0")/.."
 CC="${CC:-cc}"
 PY="${PYTHON:-python3}"
-# the pinned Node (tools/setup_toolchain.sh) for the web tests, where it is
+# the pinned Node and Zig (tools/setup_toolchain.sh), where they are: Node for the web tests; the browser emulator built
+# with zig cc (tools/build.py --web-zig) where there is no emcc, the same tests on the same module
 [ -d .toolchain/node/bin ] && PATH="$PWD/.toolchain/node/bin:$PATH"
+if ! command -v emcc >/dev/null 2>&1 && { [ -x "${ZIG:-}" ] || [ -x .toolchain/zig/zig ]; }; then
+    export FM1B_WEB_CC=zig
+    web_cc=zig
+else
+    web_cc=emcc
+fi
+have_web() { [ "$web_cc" = zig ] || command -v emcc >/dev/null 2>&1; }
 # the package's SDK files (tools/fm1pkg_make.py): AC79_SDK, the home checkout, else the pinned three in .toolchain/ac79-sdk
 [ -n "${AC79_SDK:-}" ] || [ ! -d "$HOME/fw-AC79_AIoT_SDK" ] || export AC79_SDK="$HOME/fw-AC79_AIoT_SDK"
 # gen_font.py's Pillow loads FriBiDi (raqm) from the system, and on macOS uv's Python doesn't look in Homebrew's lib
@@ -239,7 +247,7 @@ run dim-app sh -c "$PY tools/build.py tests/dim_app --host && \
 # the browser emulator (tools/build.py --web, emcc): the template's worklet and app.wasm under node (boot, screen, a
 # key, MIDI in and out); its optional parts' build (fm1.toml emu); then each part's own test, tests/emu_NAME_test.mjs,
 # which builds what it needs (the template is left built as it is: resample, the part on without asking)
-if command -v emcc >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+if have_web && command -v node >/dev/null 2>&1; then
     export PYTHON="$PY"
     run emu-build "$PY" tools/build.py template --web
     run emu node tests/emu_test.mjs template/build/emu
@@ -250,13 +258,13 @@ if command -v emcc >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     done
     run emu-plain "$PY" tools/build.py template --web
 else
-    echo "  skip emu (no emcc or node)"
+    echo "  skip emu (no emcc or zig, or no node)"
 fi
 # and in the browser emulator (web/emu/emu_web.c web_sx_in, web_sx_out_*), its app.wasm under node
-if command -v emcc >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+if have_web && command -v node >/dev/null 2>&1; then
     run emu-sysex sh -c "$PY tools/build.py tests/sysex_app --web && node tests/sysex_web_test.mjs tests/sysex_app/build/emu"
 else
-    echo "  skip emu-sysex (no emcc or node)"
+    echo "  skip emu-sysex (no emcc or zig, or no node)"
 fi
 # the backup in the host simulator (backup, expect value) on a small app with backup = true: tests/backup_app (the
 # emulator's part "backup" has its own test, emu_backup_test.mjs, on the same app)

@@ -20,7 +20,7 @@ app runs on the computer in the host simulator and in the browser: try the templ
 
 To build for the FM-1 you need JieLi's Linux toolchain and three files of the AC79 SDK. `tools/get_toolchain.sh`
 fetches the latest toolchain into `~/.jieli` (the quick way; set `JIELI_TOOLCHAIN` and `AC79_SDK`). Or pin
-everything: `tools/setup_toolchain.sh` fetches the toolchain, the SDK's three files, Node, osv-scanner and
+everything: `tools/setup_toolchain.sh` fetches the toolchain, the SDK's three files, Zig, Node, osv-scanner and
 fm1-reader into `.toolchain/` in the repository, each checked against the SHA-256 or commit in
 `tools/toolchain.lock` before it is unpacked, and `tools/build.py` finds them there when the variables are unset;
 its `python` step makes `.venv` from `uv.lock` (Pillow pinned, every package by hash: `pyproject.toml`), so
@@ -56,6 +56,7 @@ parts it has.
 | The USB host's device by name (its product string), for the app's own page | `#define APP_USB_HOST_NAME` in app.h, with `usb_host` | `plat_usb_host_name` |
 | The second core: a worker for part of the render (how to use it: [docs/SECOND-CORE.md](docs/SECOND-CORE.md)) | `cpu2 = true`; `cpu2_fallback = true` for one core after a failure instead of a restart; `cpu2_stack` | `plat_cpu2_set(1)` in `app_init`; `plat_cpu2_run`, `plat_cpu2_wait` in the render; `plat_cpu2_sync`, `plat_core`; `plat_cpu2_gave_up`, `plat_cpu2_barred` |
 | Lower case in the big fonts | `font_full = ["L"]` | the fonts as ever |
+| The browser emulator built with `zig cc` instead of Emscripten (the same module, from one signed archive with no package tree; `tools/setup_toolchain.sh` pins Zig) | `tools/build.py APP_DIR --web-zig`, or `FM1B_WEB_CC=zig` with `--web` | nothing |
 | The firmware as an `.rfm1` for host apps (RemoteFM1 for iOS), below | `tools/build.py APP_DIR --rfm1` | nothing |
 | The browser emulator's own parts (`tools/build.py --web`): web/emu/parts, each file saying what it does; without any, the page and app.wasm are as before. One is on without asking: `resample`, the FM-1's 44.1 kHz played at the browser's rate (many computers run audio at 48 kHz), where the page takes parts (fm1-base's page and worklet) | `emu = ["name", ...]`, `"-resample"` to leave it out (or `FM1B_EMU="name ..."` for one build: those parts only) | nothing, unless a part says so |
 

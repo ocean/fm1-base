@@ -10,17 +10,19 @@
 #   .toolchain/ac79-sdk    the three files of the JieLi AC79 SDK that go into every package (a sparse checkout;
 #                          Bluetooth and WiFi builds still need a whole checkout at $AC79_SDK)
 #   .toolchain/node        Node, the binary only (no npm, npx or corepack), for the web tests
+#   .toolchain/zig         Zig, whose zig cc builds the browser emulator (tools/build.py --web-zig); its cache in
+#                          .toolchain/zig-cache
 #   .toolchain/bin         osv-scanner (tools/osv_scan.sh)
 #   .toolchain/uv          uv, where none is installed (a fresh CI runner): it makes .venv
 #   .venv                  Python with the packages in uv.lock (uv sync --frozen; pyproject.toml says why these)
 #   .toolchain/fm1-reader  fm1-reader at its pinned commit, when there is no checkout next to this repository (the
 #                          emulator page's screen reader: tools/build.py --web)
 # A step is skipped when its folder already holds the pinned version; change a pin and run it again to update.
-# --only takes a comma-separated list of steps (jieli, ac79-sdk, node, python, osv-scanner, fm1-reader, uv): CI fetches
+# --only takes a comma-separated list of steps (jieli, ac79-sdk, node, python, zig, osv-scanner, fm1-reader, uv): CI fetches
 # just what a job needs through the same checks.
 #   tools/setup_toolchain.sh [--only STEP,...]
 set -eu
-STEPS=jieli,ac79-sdk,node,python,osv-scanner,fm1-reader
+STEPS=jieli,ac79-sdk,node,python,zig,osv-scanner,fm1-reader
 USAGE="usage: tools/setup_toolchain.sh [--only STEP,...]"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -154,6 +156,21 @@ if want python; then
     UV=$TC/uv/uv
     [ -x $UV ] || UV=$(command -v uv) || die "needs uv (https://docs.astral.sh/uv/, or --only uv)"
     "$UV" sync --frozen ${UV_SYNC_ARGS:-}              # (UV_SYNC_ARGS: other groups, as CI wants)
+fi
+
+# Zig: one archive, minisign-signed by its maintainers (the pin's hash was taken after checking that signature,
+# tools/minisign_verify.py). zig cc builds the wasi-libc it needs from the source it ships, once, into
+# .toolchain/zig-cache (keyed by Zig's own version and inputs, so it survives a Zig update safely).
+if want zig; then
+    set -- $(pin zig)
+    if ! current $TC/zig "$2"; then
+        file=$(fetch "$3" "$2") || exit 1
+        unpack "$file" $TC/zig "$2"
+        inner=$(ls -d $TC/zig/zig-*)
+        for d in "$inner"/*; do mv "$d" $TC/zig/; done
+        rmdir "$inner"
+    fi
+    [ "$($TC/zig/zig version)" = "$1" ] || die "$TC/zig: zig doesn't run, or isn't $1"
 fi
 
 # osv-scanner.

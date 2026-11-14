@@ -6,7 +6,8 @@
 
   tools/build.py APP_DIR [--release X.Y[.Z][-suffix]] [--no-ble]
   tools/build.py APP_DIR --host        the host simulator instead: APP_DIR/build/host/NAME_host (cc, no toolchain)
-  tools/build.py APP_DIR --web         the browser emulator instead: APP_DIR/build/emu/ (emcc); the page is the
+  tools/build.py APP_DIR --web         the browser emulator instead: APP_DIR/build/emu/ (emcc; --web-zig or FM1B_WEB_CC=zig
+                                       builds the same module with zig cc, tools/setup_toolchain.sh's); the page is the
                                        simulator alone (panel, screen, sound, screen reader), for a site to link or frame;
                                        an app may bring its own (APP_DIR/web/emu/index.html, worklet.js)
   tools/build.py APP_DIR --rfm1        the app as an .rfm1 instead: APP_DIR/build/rfm1/ID-dev+COMMIT.rfm1 (emcc), the
@@ -1290,17 +1291,18 @@ def o2_files():
     return [f for u in CONF.get("o2", []) for f in (sorted(APP.glob(u)) if any(ch in u for ch in "*?[") else [APP / u])]
 
 
-def o2_objects(cc, base_flags, out):
+def o2_objects(cc, base_flags, out, env=None):
     """the o2 units compiled apart (each with its own flags: o2_cflags, o2_include, its directory) for the host or the
-    browser; their objects"""
+    browser; their objects. cc: the compiler command, a name or a list (zig cc and its target)"""
+    cc = [cc] if isinstance(cc, str) else list(cc)
     extra = [*CONF.get("o2_cflags", []), *[a for h in CONF.get("o2_include", []) for a in ("-include", str(APP / h))]]
     out.mkdir(parents=True, exist_ok=True)
     jobs = [(f, out / ("_".join(f.relative_to(APP).with_suffix("").parts) + ".o")) for f in o2_files()]
 
     def one(job):
         f, o = job
-        r = subprocess.run([cc, *base_flags, *extra, f"-I{f.parent}", "-c", str(f), "-o", str(o)],
-                           capture_output=True, text=True)
+        r = subprocess.run([*cc, *base_flags, *extra, f"-I{f.parent}", "-c", str(f), "-o", str(o)],
+                           capture_output=True, text=True, env=env)
         return r.stderr if r.returncode else ""
     with ThreadPoolExecutor(8) as ex:
         errs = [e for e in ex.map(one, jobs) if e]
@@ -1310,7 +1312,7 @@ def o2_objects(cc, base_flags, out):
     return [str(o) for _, o in jobs]
 
 
-def web_objects(base_flags, out):
+def web_objects(cc, base_flags, out, env=None):
     """fm1.toml web = [...]: units compiled into the browser's emulator only (a firmware's plug-ins, linked in where
     the device loads them at run time), relative to APP_DIR (globs too); their objects"""
     files = [f for u in CONF.get("web", []) for f in (sorted(APP.glob(u)) if any(ch in u for ch in "*?[") else [APP / u])]
@@ -1319,7 +1321,7 @@ def web_objects(base_flags, out):
 
     def one(job):
         f, o = job
-        r = subprocess.run(["emcc", *base_flags, f"-I{f.parent}", "-c", str(f), "-o", str(o)], capture_output=True, text=True)
+        r = subprocess.run([*cc, *base_flags, f"-I{f.parent}", "-c", str(f), "-o", str(o)], capture_output=True, text=True, env=env)
         return r.stderr if r.returncode else ""
     with ThreadPoolExecutor(8) as ex:
         errs = [e for e in ex.map(one, jobs) if e]
@@ -1526,30 +1528,52 @@ def emu_parts_out(emu, parts):
     print(f"emu      parts: {' '.join(parts)}")
 
 
+def web_cc():
+    """the emulator's compiler, and the environment to run it in: emcc (Emscripten), or with FM1B_WEB_CC=zig (--web-zig)
+    zig cc for wasm32-wasi (clang with a wasi-libc it builds from the source it ships: one signed archive, no package
+    tree): ZIG, else the Zig tools/setup_toolchain.sh pinned in .toolchain/ (fm1-base's, or the app repository's
+    with fm1-base a submodule), else zig on the PATH; its caches inside the repository, not in the user's home"""
+    if os.environ.get("FM1B_WEB_CC", "emcc") != "zig":
+        return ["emcc"], None
+    pinned = [d / "zig" / "zig" for d in (SRC / ".toolchain", APP.parent.parent / ".toolchain") if (d / "zig" / "zig").exists()]
+    zig = os.environ.get("ZIG") or (str(pinned[0]) if pinned else "zig")
+    cache = pinned[0].parent.parent if pinned else OUT
+    env = {**os.environ, "ZIG_GLOBAL_CACHE_DIR": str(cache / "zig-cache"), "ZIG_LOCAL_CACHE_DIR": str(OUT / "zig-cache")}
+    return [zig, "cc", "-target", "wasm32-wasi", "-mexec-model=reactor"], env
+
+
 def build_web():
     """the host simulator in WebAssembly (web/emu/emu_web.c) and its page, in OUT/emu; the screen reader's voice
     (eSpeak NG, GPL: a separate program the page loads) from an fm1-reader checkout next to fm1-base, if there"""
     import shutil
     emu = OUT / "emu"
     emu.mkdir(parents=True, exist_ok=True)
+    cc, env = web_cc()
+    zig = cc[0] != "emcc"
     web_inc = [f"-I{d}" for d in (SRC / "host", SRC / "device", SRC / "include", SRC / "lib", APP, GEN, *(APP / d for d in CONF.get("include", [])))]
     wf = CONF.get("web_cflags", [])
-    o2_objs = o2_objects("emcc", ["-O2", "-ffp-contract=off", "-std=gnu99", "-w", "-DPLAT_HOST", "-DPLAT_WEB", *wf, *opt_flags(), *web_inc],
-                         emu / "o2")
-    o2_objs += web_objects(["-O2", "-ffp-contract=off", "-std=gnu99", "-w", "-DPLAT_HOST", "-DPLAT_WEB", *wf, *opt_flags(), *web_inc],
-                           emu / "web")
+    if zig and wf:
+        print(f"emu: web_cflags are emcc's, not passed to zig cc: {' '.join(wf)}")
+        wf = []
+    o2_objs = o2_objects(cc, ["-O2", "-ffp-contract=off", "-std=gnu99", "-w", "-DPLAT_HOST", "-DPLAT_WEB", *wf, *opt_flags(), *web_inc],
+                         emu / "o2", env)
+    o2_objs += web_objects(cc, ["-O2", "-ffp-contract=off", "-std=gnu99", "-w", "-DPLAT_HOST", "-DPLAT_WEB", *wf, *opt_flags(), *web_inc],
+                           emu / "web", env)
     parts = emu_parts()
-    cmd = ["emcc", "-O2", "-ffp-contract=off", "-std=gnu99", "-Wall", "-Wno-unused-function", "-Wno-unused-parameter",
+    # the same module either way: a WASI reactor with the exports the worklet calls, a 1 MiB stack, 32 MiB of memory
+    link = ["-g0", "-Wl,--export-dynamic", "-Wl,--strip-all", "-Wl,-z,stack-size=1048576", "-Wl,--initial-memory=33554432"] if zig \
+        else ["--no-entry", "-sSTANDALONE_WASM", "-sSTACK_SIZE=1048576", "-sINITIAL_MEMORY=33554432", "-sFILESYSTEM=0"]
+    cmd = [*cc, "-O2", "-ffp-contract=off", "-std=gnu99", "-Wall", "-Wno-unused-function", "-Wno-unused-parameter",
            "-Wno-unused-variable", "-DPLAT_HOST", "-DPLAT_WEB", *opt_flags(), *(f"-DFM1B_EMU_{p.upper()}=1" for p in parts), *["-DFM1B_BLE=1"] * BLE, *["-DFM1B_BLE_CENTRAL=1"] * (BLE and bool(CONF.get("ble_central"))), *["-DFM1B_BT_AUDIO=1"] * bta_sim(), *(bta_mem_flags() if bta_sim() else []), *["-DFM1B_WIFI=1"] * WIFI, *(f'-DAPP_VERSION="{VERSION}"',) * bool(VERSION),
            *(f"-I{d}" for d in (SRC / "host", SRC / "device", SRC / "include", SRC / "lib", APP, GEN, *(APP / d for d in CONF.get("include", [])))),
-           *wf, "--no-entry", "-sSTANDALONE_WASM", "-sSTACK_SIZE=1048576", "-sINITIAL_MEMORY=33554432", "-sFILESYSTEM=0",
+           *wf, *link,
            "-o", str(emu / "app.wasm"), str(SRC / "web" / "emu" / "emu_web.c"), *o2_objs,
            *[str(f) for u in CONF.get("web_link", []) for f in (sorted(APP.glob(u)) if any(ch in u for ch in "*?[")
-                                                               else [APP / u])]]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+                                                               else [APP / u])], *["-lm"] * zig]
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
     sys.stderr.write(r.stderr)
     if r.returncode:
-        raise SystemExit("build: the emulator did not compile (emcc: Emscripten)")
+        raise SystemExit("build: the emulator did not compile (" + ("zig cc: tools/setup_toolchain.sh, or ZIG" if zig else "emcc: Emscripten") + ")")
     # the page: the app's own (APP_DIR/web/emu/index.html, worklet.js), or fm1-base's
     web = {f: (APP / "web" / "emu" / f if (APP / "web" / "emu" / f).exists() else SRC / "web" / "emu" / f)
            for f in ("index.html", "worklet.js")}
@@ -1693,8 +1717,11 @@ def main():
     ap.add_argument("--sdk", type=Path, help="JieLi AC79 SDK checkout (default: $AC79_SDK)")
     ap.add_argument("--host", action="store_true", help="build the host simulator instead of the firmware")
     ap.add_argument("--web", action="store_true", help="build the browser emulator instead of the firmware")
+    ap.add_argument("--web-zig", action="store_true", help="the browser emulator built with zig cc (FM1B_WEB_CC=zig) instead of emcc")
     ap.add_argument("--rfm1", action="store_true", help="build an .rfm1 (host apps) instead of the firmware")
     a = ap.parse_args()
+    if a.web_zig:
+        a.web, os.environ["FM1B_WEB_CC"] = True, "zig"
     APP = a.app.resolve()
     CONF = read_conf(APP / "fm1.toml")
     NAME = CONF.get("name", APP.name).lower()
