@@ -12,7 +12,8 @@
 #                page): eSpeak NG at the commit it was built from, asked of osv.dev by commit (osv-scanner scans no
 #                prebuilt WebAssembly); accepted findings, one a line with an expiry and a reason, in
 #                tools/osv-espeak-accepted.txt
-# Parts whose tools aren't fetched are skipped. Reports (JSON) in build/osv/. Exits 1 on any finding.
+# Zig has no package dependencies to scan (its wasi-libc is built from the source it ships); its pin is a signed
+# release. Parts whose tools aren't fetched are skipped. Reports (JSON) in build/osv/. Exits 1 on any finding.
 #   tools/osv_scan.sh [part ...]       (default: every part)
 set -u
 cd "$(dirname "$0")/.."
